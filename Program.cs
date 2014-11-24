@@ -16,14 +16,13 @@ namespace CloudConnect.BackgroundWorker
         /// </summary>
         static void Main()
         {
-            CloudConnect.CouchBaseProvider.CouchbaseManager.Instance.RegisterBucketConfiguration("couchbaseClients/couchbase", "webdemo");
+            MD.CloudConnect.CouchBaseProvider.CouchbaseManager.Instance.RegisterBucketConfiguration("couchbaseClients/couchbase", "webdemo");
             FieldManager.Instance.Initialize();
 
             ServiceBase[] servicesToRun;
             servicesToRun = new ServiceBase[] 
             {
-                new NotificationWorker(),
-                new TrackRebuilder()
+                new NotificationWorker()
             };
             if (Environment.UserInteractive)
             {
