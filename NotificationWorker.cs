@@ -212,7 +212,7 @@ namespace CloudConnect.BackgroundWorker
                 watch.Restart();
                 if (tracks.Count > 0)
                     CouchbaseManager.Instance.TrackRepository.BulkUpsert(tracks);
-                CouchbaseManager.Instance.NotificationRepository.BulkUpsert(data);
+                CouchbaseManager.Instance.NotificationRepository.BulkUpsert(data,86400);
                 InternalLogger.WriteLog(String.Format("[Notif Worker]Save Notif :{0} ms", watch.ElapsedMilliseconds));
                 watch.Restart();
             }
@@ -263,7 +263,8 @@ namespace CloudConnect.BackgroundWorker
             InternalLogger.WriteLog(String.Format("[Track Worker]{0} tracks - waiting data", tracks.Count - mustBeSaved.Count));
             InternalLogger.WriteLog(String.Format("[Track Worker]{0} tracks - ok", mustBeSaved.Where(x => x.Status == 1).Count()));
             InternalLogger.WriteLog(String.Format("[Track Worker]{0} tracks - timeout", mustBeSaved.Where(x => x.Status == 2).Count()));
-            InternalLogger.WriteLog(String.Format("[Track Worker]{0} tracks - others", mustBeSaved.Where(x => x.Status != 2 && x.Status != 1).Count()));
+            InternalLogger.WriteLog(String.Format("[Track Worker]{0} tracks - bad time", mustBeSaved.Where(x => x.Status == 5).Count()));
+            InternalLogger.WriteLog(String.Format("[Track Worker]{0} tracks - others", mustBeSaved.Where(x => x.Status != 2 && x.Status != 1 && x.Status != 5).Count()));
             if (mustBeSaved.Count > 0)
                 CouchbaseManager.Instance.TrackRepository.BulkUpsert(mustBeSaved);
 
@@ -278,7 +279,11 @@ namespace CloudConnect.BackgroundWorker
 
         private List<Track> RebuildHistory()
         {
-            List<Track> tracks = CouchbaseManager.Instance.TrackRepository.GetNotDecodedTrack(1000, true, _lastTrackId);
+            List<Track> tracks = null;
+            if(String.IsNullOrEmpty(_lastTrackId))
+                tracks = CouchbaseManager.Instance.TrackRepository.GetNotDecodedTrack(1000, false);
+            else
+                tracks = CouchbaseManager.Instance.TrackRepository.GetNotDecodedTrack(1000, true, _lastTrackId);
 
             if (tracks.Count > 0)
             {
@@ -300,7 +305,7 @@ namespace CloudConnect.BackgroundWorker
                     if (!_devicesRebuild.Contains(device.Imei))
                         _devicesRebuild.Add(device.Imei);
                     Track previous = null;
-                    IEnumerable<Track> sortedTrack = group.OrderBy(x => x.OrderingKey);
+                    IEnumerable<Track> sortedTrack = group.OrderBy(x => x.Recorded_at);
                     foreach (Track t in sortedTrack)
                     {
                         if (UpdateFieldHistory(device, t))
@@ -344,7 +349,7 @@ namespace CloudConnect.BackgroundWorker
                 //hack connection id change but index still increase
                 if (d.NextWaitingIndex == t.Index || t.Index == 1)
                     return 1;
-                if (d.LastRecordedAt > t.Recorded_at)
+                if (d.LastRecordedAt > t.Recorded_at && (d.LastRecordedAt.Ticks - t.Recorded_at.Ticks) > (TimeSpan.TicksPerMinute * 15))
                     return 5;
             }
 
@@ -361,6 +366,24 @@ namespace CloudConnect.BackgroundWorker
             return 0;
         }
 
+        private void mergeField(Device d, Track t)
+        {
+            foreach (KeyValuePair<string, Field> item in t.Fields)
+            {
+                if (d.Fields.ContainsKey(item.Key))
+                    d.Fields[item.Key] = item.Value;
+                else d.Fields.Add(item.Key, item.Value);
+            }
+
+            foreach (KeyValuePair<string, Field> item in d.Fields)
+            {
+                if (_fieldManager.MustBeRebuild(item.Value.Key) && !t.Fields.ContainsKey(item.Key))
+                {
+                    t.Fields[item.Key] = item.Value;
+                }
+            }
+        }
+
         /// <summary>
         /// 
         /// </summary>
@@ -373,11 +396,12 @@ namespace CloudConnect.BackgroundWorker
             //already decoded but download in the view because all nodes are yet all updated
             if (t.Status > 0)
                 return false;
-
+            t.Updated_at = DateTime.UtcNow;
             int mergeStatus = CanBeUpdate(d, t);
             if (mergeStatus == 1)
             {
                 d.NextWaitingIndex = t.Index.Value + (uint)(t.Fields.Count + 1);
+                t.NextWaitingIndex = t.Index.Value + (uint)(t.Fields.Count + 1);
                 if (t.Latitude != 0.0 && t.Longitude != 0.0)
                 {
                     d.LastLatitude = t.Latitude;
@@ -391,19 +415,7 @@ namespace CloudConnect.BackgroundWorker
                 d.UpdatedAt = DateTime.UtcNow;
                 d.LastTrackId = CouchbaseManager.Instance.TrackRepository.BuildKey(t);
 
-                Dictionary<string, Field> fieldNotRebuild = new Dictionary<string, Field>();
-                foreach (KeyValuePair<string, Field> item in t.Fields)
-                {
-                    if (_fieldManager.MustBeRebuild(item.Value.Key))
-                    {
-                        if (d.Fields.ContainsKey(item.Key))
-                            d.Fields[item.Key] = item.Value;
-                        else d.Fields.Add(item.Key, item.Value);
-                    }
-                    else
-                        fieldNotRebuild.Add(item.Key, item.Value);
-                }
-                t.Fields = d.Fields.Concat(fieldNotRebuild).ToDictionary(x => x.Key, x => x.Value);
+                mergeField(d, t);
                 t.Status = 1;
             }
             else if (mergeStatus == 0)
@@ -414,29 +426,28 @@ namespace CloudConnect.BackgroundWorker
             {
                 //specific case - timeout
                 // Add log here
-                t.Status = 3;
+                t.Status = 2;
             }
             else if (mergeStatus == 3)
             {
                 // Add log here
-                t.Status = 2;
+                //same connection id and index
+                t.Status = 3;
             }
             else if (mergeStatus == 4)
             {
                 foreach (KeyValuePair<string, Field> item in t.Fields)
                 {
-                    if (_fieldManager.MustBeRebuild(item.Value.Key))
-                    {
-                        if (d.Fields.ContainsKey(item.Key))
-                            d.Fields[item.Key] = item.Value;
-                        else d.Fields.Add(item.Key, item.Value);
-                    }
+                    if (d.Fields.ContainsKey(item.Key))
+                        d.Fields[item.Key] = item.Value;
+                    else d.Fields.Add(item.Key, item.Value);
                 }
                 t.Status = 4;
             }
             else if (mergeStatus == 5)
             {
                 // recorded at was in the past compare to the data already decoded for this device
+                t.Status = 5;
             }
             return false;
         }
