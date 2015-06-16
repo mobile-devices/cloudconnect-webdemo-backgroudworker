@@ -21,20 +21,10 @@ namespace CloudConnect.BackgroundWorker
         private FieldManager _fieldManager;
         private DeviceManager _deviceManager;
 
-        private string _lastNotifId = String.Empty;
-
         private bool _workInProgressForTrack = false;
-
         private Timer _tracktimer;
 
-        private List<Track> _cache = new List<Track>();
-        private string _lastTrackId = String.Empty;
-        private string _nextTrackId = String.Empty;
-
         private List<string> _devicesRebuild = new List<string>();
-
-        private const int MAX_CYCLE = 15;
-        private int _currentCycle = 1;
 
         public NotificationWorker()
         {
@@ -52,7 +42,7 @@ namespace CloudConnect.BackgroundWorker
             InternalLogger.WriteLog("Start Notification Timer");
             _notificationtimer.Enabled = true;
 
-            _tracktimer = new Timer(500);
+            _tracktimer = new Timer(1000);
             _tracktimer.Elapsed += _tracktimer_Elapsed;
             InternalLogger.WriteLog("Start Track Timer");
             _tracktimer.Enabled = true;
@@ -77,12 +67,17 @@ namespace CloudConnect.BackgroundWorker
                 Stopwatch watch = new Stopwatch();
                 watch.Start();
                 int total = GenerateTrack();
-                InternalLogger.WriteLog(String.Format("[Notif Worker] {0} tracks", total));
-                InternalLogger.WriteLog(String.Format("[Notif Worker] Decode and store :{0} ms", watch.ElapsedMilliseconds));
+                if (total > 0)
+                {
+                    InternalLogger.WriteLog(String.Format("[Notif Worker] {0} tracks", total));
+                    InternalLogger.WriteLog(String.Format("[Notif Worker] Decode and store :{0} ms", watch.ElapsedMilliseconds));
+                }
             }
             catch (Exception ex)
             {
-                Console.WriteLine("[Notif Worker] error" + ex.Message);
+                /// InternalLogger.WriteLog(CouchbaseManager.Instance.DataListRepository.FlushLog());
+                InternalLogger.WriteLog("[Notif Worker] error" + ex.Message);
+                InternalLogger.WriteLog("[Notif Worker] stacktrace" + ex.ToString());
             }
             finally
             {
@@ -97,28 +92,26 @@ namespace CloudConnect.BackgroundWorker
             foreach (KeyValuePair<string, MD.CloudConnect.Data.Field> item in fields)
             {
                 result.Add(item.Key.ToLowerInvariant(), new MD.CloudConnect.CouchBaseProvider.Field()
-                    {
-                        Key = item.Key,
-                        B64Value = item.Value.b64_value,
-                        RecordedAt = recordedAt
-                    });
+                {
+                    Key = item.Key,
+                    B64Value = item.Value.b64_value,
+                    RecordedAt = recordedAt
+                });
             }
             return result;
         }
 
         private bool CanBeGenerate(Track t)
         {
-            Device d = _deviceManager.GetDevice(t.Imei);
-            if (d.LastRecordedAt <= t.Recorded_at)
-                return true;
-            else
-            {
-                string key = CouchbaseManager.Instance.TrackRepository.BuildKey(t);
-                Track lastTrack = CouchbaseManager.Instance.TrackRepository.Get(key);
-                if (lastTrack == null)
-                    return true;
-                else return false;
-            }
+            //Device d = _deviceManager.GetDevice(t.Imei);
+            //if (d.LastRecordedAt <= t.Recorded_at)
+            //    return true;
+            //else
+            //{
+            //    string key = CouchbaseManager.Instance.TrackRepository.BuildKey(t);
+            //    return !CouchbaseManager.Instance.TrackRepository.KeyExist(key);
+            //}
+            return true;
         }
 
         private int GenerateTrack()
@@ -128,47 +121,40 @@ namespace CloudConnect.BackgroundWorker
             Stopwatch watch = new Stopwatch();
             watch.Start();
 
-            List<MD.CloudConnect.CouchBaseProvider.Notification> data = CouchbaseManager.Instance.NotificationRepository.RequestNotificationCache("GLOBAL", 5000, true, _lastNotifId);
-
-            InternalLogger.WriteLog(String.Format("[Notif Worker]Load Notif :{0} ms", watch.ElapsedMilliseconds));
+            int currentPages = 0;
+            List<string> data = CouchbaseManager.Instance.NotificationRepository.RequestNotificationCache(1000);
             watch.Restart();
 
             if (data.Count > 0)
             {
-                if (String.IsNullOrEmpty(_lastNotifId))
-                {
-                    _lastNotifId = data.Last().Id;
-                }
-                else
-                {
-                    _lastNotifId = data.First().Id;
-                    data.RemoveAt(0);
-                }
+                InternalLogger.WriteLog(String.Format("[Notif Worker]Load Notif :{0} ms , {1} notifs", watch.ElapsedMilliseconds, data.Count));
+
                 List<MD.CloudConnect.CouchBaseProvider.Track> tracks = new List<Track>();
                 List<string> cacheKey = new List<string>();
                 List<MDData> result = null;
-                foreach (MD.CloudConnect.CouchBaseProvider.Notification dNotif in data)
+                foreach (string dNotif in data)
                 {
-                    if (dNotif.Status == 0)
+
+                    try
                     {
-                        try
-                        {
-                            result = MD.CloudConnect.Notification.Instance.Decode(dNotif.Data);
-                        }
-                        catch
-                        {
-                            dNotif.Status = 2;
-                        }
+                        result = MD.CloudConnect.Notification.Instance.Decode(dNotif);
+                    }
+                    catch
+                    {
+                        InternalLogger.WriteLog(String.Format("[Notif Worker] Decode Notif Error : {0}", dNotif.Substring(0, 50)));
+                    }
 
-                        try
+                    try
+                    {
+                        foreach (MDData decodedData in result)
                         {
-                            foreach (MDData decodedData in result)
+                            if (decodedData.Meta.Event == "track")
                             {
-                                if (decodedData.Meta.Event == "track")
-                                {
-                                    totalTrackGenerated += 1;
-                                    ITracking t = decodedData.Tracking;
+                                totalTrackGenerated += 1;
+                                ITracking t = decodedData.Tracking;
 
+                                //if (t.Asset == "351732054617629")
+                                {
                                     MD.CloudConnect.CouchBaseProvider.Track newTrack = new Track()
                                     {
                                         Fields = BuildFields(t.Fields, t.Recorded_at),
@@ -192,29 +178,29 @@ namespace CloudConnect.BackgroundWorker
 
                                         if (tracks.Count >= 1000)
                                         {
-                                            CouchbaseManager.Instance.TrackRepository.BulkUpsert(tracks);
+                                            CouchbaseManager.Instance.TrackRepository.InsertListShouldBeTreat(tracks);
                                             tracks.Clear();
-                                            cacheKey.Clear();
                                         }
                                     }
                                 }
                             }
-                            //update notification status
-                            dNotif.Status = 1;
                         }
-                        catch (Exception ex)
-                        {
-                            InternalLogger.WriteLog(String.Format("[Notif Worker] Exception : {0}", ex.Message));
-                        }
+                        currentPages++;
+                    }
+                    catch (Exception ex)
+                    {
+                        InternalLogger.WriteLog(String.Format("[Notif Worker] Exception : {0}", ex.Message));
                     }
                 }
-                InternalLogger.WriteLog(String.Format("[Notif Worker]End Parse :{0} ms", watch.ElapsedMilliseconds));
+
+                InternalLogger.WriteLog(String.Format("[Notif Worker] End Parse :{0} ms", watch.ElapsedMilliseconds));
                 watch.Restart();
                 if (tracks.Count > 0)
-                    CouchbaseManager.Instance.TrackRepository.BulkUpsert(tracks);
-                CouchbaseManager.Instance.NotificationRepository.BulkUpsert(data,86400);
+                    CouchbaseManager.Instance.TrackRepository.InsertListShouldBeTreat(tracks);
+                CouchbaseManager.Instance.NotificationRepository.DropListRange(currentPages);
                 InternalLogger.WriteLog(String.Format("[Notif Worker]Save Notif :{0} ms", watch.ElapsedMilliseconds));
                 watch.Restart();
+                cacheKey.Clear();
             }
             return totalTrackGenerated;
         }
@@ -230,25 +216,25 @@ namespace CloudConnect.BackgroundWorker
             {
                 Stopwatch watch = new Stopwatch();
                 watch.Start();
+
                 List<Track> tracks = RebuildHistory();
-                InternalLogger.WriteLog(String.Format("[Track Worker] {0} tracks", tracks.Count));
-                InternalLogger.WriteLog(String.Format("[Track Worker] Rebuild :{0} ms / Last Doc ID : {1}", watch.ElapsedMilliseconds, _lastTrackId));
+                if (tracks.Count > 0)
+                {
+                    InternalLogger.WriteLog(String.Format("[Track Worker] {0} tracks", tracks.Count));
+                    InternalLogger.WriteLog(String.Format("[Track Worker] Rebuild :{0} ms", watch.ElapsedMilliseconds));
+                }
                 watch.Restart();
                 if (tracks.Count > 0)
-                    SaveTrackUpdated(tracks);
-                InternalLogger.WriteLog(String.Format("[Track Worker] Save :{0} ms", watch.ElapsedMilliseconds));
-
-                _currentCycle++;
-                if (_currentCycle >= MAX_CYCLE)
                 {
-                    _lastTrackId = String.Empty;
-                    _cache.Clear();
-                    _currentCycle = 1;
+                    SaveTrackUpdated(tracks);
+                    InternalLogger.WriteLog(String.Format("[Track Worker] Save :{0} ms", watch.ElapsedMilliseconds));
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine("[Track Worker] error" + ex.Message);
+                // InternalLogger.WriteLog(CouchbaseManager.Instance.DataListRepository.FlushLog());
+                InternalLogger.WriteLog("[Track Worker] error" + ex.Message);
+                InternalLogger.WriteLog("[Track Worker] stacktrace" + ex.ToString());
             }
             finally
             {
@@ -266,12 +252,13 @@ namespace CloudConnect.BackgroundWorker
             InternalLogger.WriteLog(String.Format("[Track Worker]{0} tracks - bad time", mustBeSaved.Where(x => x.Status == 5).Count()));
             InternalLogger.WriteLog(String.Format("[Track Worker]{0} tracks - others", mustBeSaved.Where(x => x.Status != 2 && x.Status != 1 && x.Status != 5).Count()));
             if (mustBeSaved.Count > 0)
+            {
+                CouchbaseManager.Instance.TrackRepository.DropListRange(mustBeSaved, tracks);
                 CouchbaseManager.Instance.TrackRepository.BulkUpsert(mustBeSaved);
-
-            // we are waiting the last moment to update cache and lastTrackId in case of the bulkinsert crash
-            _cache.Clear();
-            _cache = tracks.Where(t => t.Status == 0).ToList();
-            _lastTrackId = _nextTrackId;
+            }
+            // we are waiting the last moment to update cache
+            //_cache.Clear();
+            //_cache = tracks.Where(t => t.Status == 0).ToList();
 
             _deviceManager.FlushModification(_devicesRebuild);
             _devicesRebuild.Clear();
@@ -280,21 +267,12 @@ namespace CloudConnect.BackgroundWorker
         private List<Track> RebuildHistory()
         {
             List<Track> tracks = null;
-            if(String.IsNullOrEmpty(_lastTrackId))
-                tracks = CouchbaseManager.Instance.TrackRepository.GetNotDecodedTrack(1000, false);
-            else
-                tracks = CouchbaseManager.Instance.TrackRepository.GetNotDecodedTrack(1000, true, _lastTrackId);
+            tracks = CouchbaseManager.Instance.TrackRepository.GetNotDecodedTrack(10000);
 
             if (tracks.Count > 0)
             {
-                if (!String.IsNullOrEmpty(_lastTrackId))
-                {
-                    _nextTrackId = tracks.Last().Id;
-                    tracks.RemoveAt(0);
-                    tracks.AddRange(_cache);
-                }
-                else
-                    _nextTrackId = tracks.Last().Id;
+                //if (_cache.Count() > 0)
+                //    tracks.AddRange(_cache);
 
                 Device device = null;
                 var groupedTracks = tracks.GroupBy(x => x.Imei);
@@ -305,7 +283,7 @@ namespace CloudConnect.BackgroundWorker
                     if (!_devicesRebuild.Contains(device.Imei))
                         _devicesRebuild.Add(device.Imei);
                     Track previous = null;
-                    IEnumerable<Track> sortedTrack = group.OrderBy(x => x.Recorded_at);
+                    IEnumerable<Track> sortedTrack = group.OrderBy(x => x.ConnectionId).ThenBy(x => x.Index);
                     foreach (Track t in sortedTrack)
                     {
                         if (UpdateFieldHistory(device, t))
@@ -347,14 +325,14 @@ namespace CloudConnect.BackgroundWorker
             else
             {
                 //hack connection id change but index still increase
-                if (d.NextWaitingIndex == t.Index || t.Index == 1)
-                    return 1;
+                //if (d.NextWaitingIndex == t.Index || t.Index == 1)
+                //    return 1;
                 if (d.LastRecordedAt > t.Recorded_at && (d.LastRecordedAt.Ticks - t.Recorded_at.Ticks) > (TimeSpan.TicksPerMinute * 15))
                     return 5;
             }
 
             // timeout
-            if ((DateTime.UtcNow.Ticks - t.Created_at.Ticks) > (TimeSpan.TicksPerMinute * 5))
+            if ((DateTime.UtcNow.Ticks - t.Created_at.Ticks) > (TimeSpan.TicksPerMinute * 15))
             {
                 //try to rebuild if recorded at is correct
                 if (t.Recorded_at > d.LastRecordedAt)
@@ -398,10 +376,23 @@ namespace CloudConnect.BackgroundWorker
                 return false;
             t.Updated_at = DateTime.UtcNow;
             int mergeStatus = CanBeUpdate(d, t);
-            if (mergeStatus == 1)
+           // if (mergeStatus != 1)
+           //     InternalLogger.WriteLog(String.Format("[{0}] {5} / cloud : '{1}' connection id : '{2}' index : '{3}' mergeStatus : '{4}'", t.Recorded_at.ToString("dd HH:mm:ss"), t.CloudId, t.ConnectionId, t.Index, mergeStatus, d.Imei));
+
+            if (mergeStatus == 4)
             {
-                d.NextWaitingIndex = t.Index.Value + (uint)(t.Fields.Count + 1);
-                t.NextWaitingIndex = t.Index.Value + (uint)(t.Fields.Count + 1);
+                foreach (KeyValuePair<string, Field> item in t.Fields)
+                {
+                    if (d.Fields.ContainsKey(item.Key))
+                        d.Fields[item.Key] = item.Value;
+                    else d.Fields.Add(item.Key, item.Value);
+                }
+                t.Status = 4;
+            }
+            else
+            {
+                d.NextWaitingIndex = (t.Index.HasValue ? t.Index.Value : 0) + (uint)(t.Fields.Count + 1);
+                t.NextWaitingIndex = d.NextWaitingIndex;
                 if (t.Latitude != 0.0 && t.Longitude != 0.0)
                 {
                     d.LastLatitude = t.Latitude;
@@ -415,39 +406,32 @@ namespace CloudConnect.BackgroundWorker
                 d.UpdatedAt = DateTime.UtcNow;
                 d.LastTrackId = CouchbaseManager.Instance.TrackRepository.BuildKey(t);
 
-                mergeField(d, t);
-                t.Status = 1;
-            }
-            else if (mergeStatus == 0)
-            {
-                return true;
-            }
-            else if (mergeStatus == 2)
-            {
-                //specific case - timeout
-                // Add log here
-                t.Status = 2;
-            }
-            else if (mergeStatus == 3)
-            {
-                // Add log here
-                //same connection id and index
-                t.Status = 3;
-            }
-            else if (mergeStatus == 4)
-            {
-                foreach (KeyValuePair<string, Field> item in t.Fields)
+                if (mergeStatus == 1)
                 {
-                    if (d.Fields.ContainsKey(item.Key))
-                        d.Fields[item.Key] = item.Value;
-                    else d.Fields.Add(item.Key, item.Value);
+                    mergeField(d, t);
+                    t.Status = 1;
                 }
-                t.Status = 4;
-            }
-            else if (mergeStatus == 5)
-            {
-                // recorded at was in the past compare to the data already decoded for this device
-                t.Status = 5;
+                else if (mergeStatus == 0)
+                {
+                    return true;
+                }
+                else if (mergeStatus == 2)
+                {
+                    //specific case - timeout
+                    // Add log here
+                    t.Status = 2;
+                }
+                else if (mergeStatus == 3)
+                {
+                    // Add log here
+                    //same connection id and index
+                    t.Status = 3;
+                }
+                else if (mergeStatus == 5)
+                {
+                    // recorded at was in the past compare to the data already decoded for this device
+                    t.Status = 5;
+                }
             }
             return false;
         }

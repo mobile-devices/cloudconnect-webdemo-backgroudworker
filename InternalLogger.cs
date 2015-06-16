@@ -9,9 +9,11 @@ namespace CloudConnect.BackgroundWorker
     public static class InternalLogger
     {
         private static DateTime _lastFlush = DateTime.MinValue;
+        private static object _lO = new object();
 
         public static void WriteLog(string log)
         {
+
             if (Environment.UserInteractive)
                 Console.WriteLine(String.Format("[{0}] log : {1}", DateTime.UtcNow, log));
             else
@@ -23,10 +25,13 @@ namespace CloudConnect.BackgroundWorker
                     append = false;
                     _lastFlush = DateTime.UtcNow;
                 }
-                StreamWriter sw = new StreamWriter(AppDomain.CurrentDomain.BaseDirectory + @"\LogFile.txt", append);
-                sw.WriteLine(String.Format("[{0}] log : {1}", DateTime.UtcNow, log));
-                sw.Flush();
-                sw.Close();
+                lock (_lO)
+                {
+                    StreamWriter sw = new StreamWriter(AppDomain.CurrentDomain.BaseDirectory + @"\LogFile.txt", append);
+                    sw.WriteLine(String.Format("[{0}] log : {1}", DateTime.UtcNow, log));
+                    sw.Flush();
+                    sw.Close();
+                }
             }
 
         }
